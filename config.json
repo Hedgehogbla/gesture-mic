@@ -14,21 +14,18 @@
   },
   "gesture": {
     "hold_ms": 500,
-    "cooldown_ms": 1500,
-    "extended_angle": 150.0,
-    "curled_angle": 100.0
+    "cooldown_ms": 1200,
+    "extended_angle": 150.0
+  },
+  "mute": {
+    "backend": "discord_hotkey",
+    "hotkey": "ctrl+shift+m"
   },
   "actions": {
-    "closed_fist": "mute",
-    "open_palm": "unmute",
-    "victory": "toggle"
-  },
-  "safety": {
-    "skip_mute_while_recording": true,
-    "restore_mic_on_exit": true
+    "point": "toggle"
   },
   "feedback": {
-    "beep": true,
-    "show_preview": true
+    "show_preview": true,
+    "beep": true
   }
 }

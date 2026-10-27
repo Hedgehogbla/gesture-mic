@@ -15,12 +15,13 @@ import time
 import urllib.request
 import winsound
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import mediapipe as mp
 
 from gestures import classify
-from mute import MuteBackend, MuteError, WindowsMic
+from mute import MuteBackend, MuteError, create_backend
 from overlay import draw_hud, draw_landmarks
 from stabilizer import GestureStabilizer
 
@@ -43,7 +44,8 @@ DEFAULTS = {
         "min_tracking_confidence": 0.6,
     },
     "gesture": {"hold_ms": 500, "cooldown_ms": 1500, "extended_angle": 150.0},
-    "actions": {"closed_fist": "mute", "open_palm": "unmute", "victory": "toggle"},
+    "mute": {"backend": "discord_hotkey", "hotkey": "ctrl+shift+m"},
+    "actions": {"point": "toggle"},
     "feedback": {"show_preview": True, "beep": True},
 }
 
@@ -142,11 +144,14 @@ def run(args: argparse.Namespace) -> int:
         return 1
     model_path = ascii_model_path(model_path)
 
+    mute_config = config["mute"]
     try:
-        backend: MuteBackend = WindowsMic()
+        backend: Optional[MuteBackend] = create_backend(mute_config["backend"], mute_config["hotkey"])
         state = "MUTED" if backend.muted else "ON"
-        print(f"Микрофон: {backend.name} [{state}]")
-    except MuteError as exc:
+        print(f"Мут: {backend.name} [{state}]")
+        if mute_config["backend"] == "discord_hotkey":
+            print(f"Хоткей Discord: {mute_config['hotkey']} (Settings -> Keybinds -> Toggle Mute)")
+    except (MuteError, ValueError) as exc:
         backend = None
         print(f"[warn] управление микрофоном отключено: {exc}")
 
