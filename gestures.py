@@ -35,6 +35,10 @@ THUMB = (1, 2, 4)
 
 DEFAULT_ANGLE = 150.0
 
+# Насколько далеко кончик большого пальца должен уйти вбок от запястья,
+# чтобы это считалось «палец вправо/влево». В долях размера кисти.
+THUMB_DEADZONE = 0.35
+
 
 def angle(a: Sequence[float], b: Sequence[float], c: Sequence[float]) -> float:
     """Угол ABC в градусах — угол между векторами BA и BC."""
@@ -57,8 +61,39 @@ def extended_fingers(points: Sequence[Sequence[float]], threshold: float = DEFAU
     return {name: is_extended(points, joints, threshold) for name, joints in FINGERS.items()}
 
 
+def thumb_direction(
+    points: Sequence[Sequence[float]],
+    deadzone: float = THUMB_DEADZONE,
+) -> Optional[str]:
+    """Куда смотрит большой палец: "left", "right" или None (вверх/вниз).
+
+    Сравниваем x кончика (4) с x запястья (0). Делим на расстояние
+    запястье → основание среднего пальца (9), чтобы порог не зависел от
+    того, близко рука к камере или далеко.
+
+    Координаты уже в зеркальном кадре, поэтому "right" — это вправо на
+    экране превью.
+    """
+    wrist = np.asarray(points[0], dtype=float)
+    tip = np.asarray(points[4], dtype=float)
+    middle_mcp = np.asarray(points[9], dtype=float)
+
+    scale = float(np.linalg.norm(middle_mcp - wrist))
+    if scale < 1e-6:
+        return None
+
+    offset = (tip[0] - wrist[0]) / scale
+    if abs(offset) < deadzone:
+        return None
+    return "right" if offset > 0 else "left"
+
+
 def classify(points: Optional[Sequence[Sequence[float]]], threshold: float = DEFAULT_ANGLE) -> str:
-    """Возвращает имя жеста: point, open_palm, closed_fist, victory, thumb, unknown, none."""
+    """Возвращает имя жеста.
+
+    point, open_palm, closed_fist, victory, thumb, thumb_left, thumb_right,
+    unknown, none.
+    """
     if points is None or len(points) < 21:
         return "none"
 
@@ -68,7 +103,10 @@ def classify(points: Optional[Sequence[Sequence[float]]], threshold: float = DEF
     if count == 4:
         return "open_palm"
     if count == 0:
-        return "thumb" if is_extended(points, THUMB, threshold) else "closed_fist"
+        if not is_extended(points, THUMB, threshold):
+            return "closed_fist"
+        direction = thumb_direction(points)
+        return f"thumb_{direction}" if direction else "thumb"
     if fingers["index"] and fingers["middle"] and not fingers["ring"] and not fingers["pinky"]:
         return "victory"
     if fingers["index"] and not (fingers["middle"] or fingers["ring"] or fingers["pinky"]):
