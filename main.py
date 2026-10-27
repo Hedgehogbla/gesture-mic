@@ -128,6 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera", type=int, default=None, help="индекс камеры")
     parser.add_argument("--no-window", action="store_true", help="без окна превью")
     parser.add_argument("--duration", type=float, default=0.0, help="остановиться через N секунд (0 = бесконечно)")
+    parser.add_argument("--debug", action="store_true", help="печатать жесты и срабатывания")
     return parser.parse_args()
 
 
@@ -193,6 +194,8 @@ def run(args: argparse.Namespace) -> int:
     fps_at = started_at
     fps_frames = 0
     muted_state = backend.muted if backend else None
+    debug = bool(args.debug)
+    last_logged = None
 
     try:
         while True:
@@ -226,8 +229,14 @@ def run(args: argparse.Namespace) -> int:
             tracked = gesture if gesture in actions else None
             decision = stabilizer.update(tracked, time.monotonic())
 
+            if debug and gesture != last_logged:
+                print(f"[debug] gesture -> {gesture}", flush=True)
+                last_logged = gesture
+
             if decision.fired:
                 text, new_state = runner.run(actions[decision.gesture])
+                if debug:
+                    print(f"[debug] fired {decision.gesture} -> {text}", flush=True)
                 action_text = text
                 action_at = time.monotonic()
                 if new_state is not None:
