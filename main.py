@@ -1,11 +1,12 @@
 """Gesture Mic: управление микрофоном жестами руки.
 
-Запуск:  python src/main.py  (или run.bat)
-Выход:   Q / Esc в окне превью, либо Ctrl+C в консоли.
+Запуск:  python main.py
+Выход:   Q / Esc в окне превью или Ctrl+C в консоли.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -18,18 +19,47 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 
-from config import load_config
-from gestures import classify, hand_in_frame
-from mic import MicController, MicError
+from gestures import classify
+from mute import MuteBackend, MuteError, WindowsMic
 from overlay import draw_hud, draw_landmarks
 from stabilizer import GestureStabilizer
 
+ROOT = Path(__file__).resolve().parent
 MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
     "hand_landmarker/float16/1/hand_landmarker.task"
 )
 WINDOW = "Gesture Mic"
 VALID_ACTIONS = ("mute", "unmute", "toggle")
+
+# Значения по умолчанию: config.json может переопределить любое из них.
+DEFAULTS = {
+    "camera": {"index": 0, "width": 640, "height": 480, "mirror": True},
+    "hand_landmarker": {
+        "model_path": "models/hand_landmarker.task",
+        "num_hands": 1,
+        "min_detection_confidence": 0.6,
+        "min_presence_confidence": 0.6,
+        "min_tracking_confidence": 0.6,
+    },
+    "gesture": {"hold_ms": 500, "cooldown_ms": 1500, "extended_angle": 150.0},
+    "actions": {"closed_fist": "mute", "open_palm": "unmute", "victory": "toggle"},
+    "feedback": {"show_preview": True, "beep": True},
+}
+
+
+def load_config(path: Path) -> dict:
+    """Читает config.json и дополняет его значениями по умолчанию."""
+    config = json.loads(json.dumps(DEFAULTS))  # глубокая копия
+    if not path.exists():
+        return config
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for section, values in raw.items():
+        if isinstance(values, dict) and isinstance(config.get(section), dict):
+            config[section].update(values)
+        else:
+            config[section] = values
+    return config
 
 
 def ensure_model(path: Path) -> None:
@@ -42,10 +72,9 @@ def ensure_model(path: Path) -> None:
 
 
 def ascii_model_path(path: Path) -> Path:
-    """MediaPipe не открывает пути с кириллицей на Windows.
+    """MediaPipe на Windows не открывает пути с кириллицей.
 
-    Если путь содержит не-ASCII символы, копируем модель в ASCII-каталог
-    и возвращаем путь к копии.
+    Если путь не-ASCII, копируем модель в ASCII-каталог и работаем с копией.
     """
     if str(path).isascii():
         return path
@@ -97,18 +126,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera", type=int, default=None, help="индекс камеры")
     parser.add_argument("--no-window", action="store_true", help="без окна превью")
     parser.add_argument("--duration", type=float, default=0.0, help="остановиться через N секунд (0 = бесконечно)")
-    parser.add_argument("--unmute", action="store_true", help="включить микрофон и выйти")
     return parser.parse_args()
 
 
 def run(args: argparse.Namespace) -> int:
-    root = Path(__file__).resolve().parent.parent
-    config_path = args.config or (root / "config.json")
-    config = load_config(config_path)
+    config = load_config(args.config or (ROOT / "config.json"))
 
     model_path = Path(config["hand_landmarker"]["model_path"])
     if not model_path.is_absolute():
-        model_path = root / model_path
+        model_path = ROOT / model_path
     try:
         ensure_model(model_path)
     except Exception as exc:
@@ -117,24 +143,20 @@ def run(args: argparse.Namespace) -> int:
     model_path = ascii_model_path(model_path)
 
     try:
-        mic = MicController()
-        mic_available = True
-    except MicError as exc:
-        mic = None
-        mic_available = False
+        backend: MuteBackend = WindowsMic()
+        state = "MUTED" if backend.muted else "ON"
+        print(f"Микрофон: {backend.name} [{state}]")
+    except MuteError as exc:
+        backend = None
         print(f"[warn] управление микрофоном отключено: {exc}")
 
     actions = {name: action for name, action in config["actions"].items() if action in VALID_ACTIONS}
     if not actions:
         print("[warn] в config.json не задано ни одного действия")
 
-    safety = config["safety"]
-    skip_mute_while_recording = bool(safety["skip_mute_while_recording"])
-    restore_mic_on_exit = bool(safety["restore_mic_on_exit"])
-
-    camera_config = config["camera"]
-    camera_index = args.camera if args.camera is not None else int(camera_config["index"])
-    capture = open_camera(camera_index, int(camera_config["width"]), int(camera_config["height"]))
+    camera = config["camera"]
+    camera_index = args.camera if args.camera is not None else int(camera["index"])
+    capture = open_camera(camera_index, int(camera["width"]), int(camera["height"]))
     if capture is None:
         print(f"[error] не удалось открыть камеру {camera_index}")
         return 1
@@ -150,24 +172,11 @@ def run(args: argparse.Namespace) -> int:
     )
     landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
 
-    stabilizer = GestureStabilizer(
-        config["gesture"]["hold_ms"],
-        config["gesture"]["cooldown_ms"],
-    )
+    stabilizer = GestureStabilizer(config["gesture"]["hold_ms"], config["gesture"]["cooldown_ms"])
     angle_threshold = float(config["gesture"]["extended_angle"])
-    curled_threshold = float(config["gesture"]["curled_angle"])
-
     show_window = bool(config["feedback"]["show_preview"]) and not args.no_window
     beep = bool(config["feedback"]["beep"])
 
-    if mic_available:
-        initial_muted = mic.is_muted()
-        state = "MUTED" if initial_muted else "ON"
-        print(f"Микрофон: {mic.name} [{state}]")
-        if initial_muted:
-            print("Микрофон сейчас выключен. Включить: src\\main.py --unmute")
-    else:
-        initial_muted = None
     print("Камера готова. Q или Esc — выход.")
 
     started_at = time.monotonic()
@@ -177,8 +186,7 @@ def run(args: argparse.Namespace) -> int:
     fps = 0.0
     fps_at = started_at
     fps_frames = 0
-    muted_state = mic.is_muted() if mic_available else None
-    state_at = started_at
+    muted_state = backend.muted if backend else None
 
     try:
         while True:
@@ -190,7 +198,7 @@ def run(args: argparse.Namespace) -> int:
                 print("[error] не удалось прочитать кадр с камеры")
                 break
 
-            if camera_config["mirror"]:
+            if camera["mirror"]:
                 frame = cv2.flip(frame, 1)
             height, width = frame.shape[:2]
 
@@ -207,33 +215,24 @@ def run(args: argparse.Namespace) -> int:
             if result.hand_landmarks:
                 landmarks = result.hand_landmarks[0]
                 points = [(point.x * width, point.y * height, point.z * width) for point in landmarks]
-                if hand_in_frame(points, width, height):
-                    gesture = classify(points, angle_threshold, curled_threshold)
-                else:
-                    gesture = "unknown"
+                gesture = classify(points, angle_threshold)
 
             tracked = gesture if gesture in actions else None
             decision = stabilizer.update(tracked, time.monotonic())
 
-            if decision.fired and mic_available:
+            if decision.fired and backend:
                 action = actions[decision.gesture]
-                will_mute = action == "mute" or (action == "toggle" and not mic.is_muted())
-                if will_mute and skip_mute_while_recording and mic.in_use_by_other_app():
-                    action_text = "RECORDING - mute skipped"
-                    action_at = time.monotonic()
-                    print("[info] другое приложение пишет с микрофона — выключение пропущено")
+                if action == "mute":
+                    backend.set_muted(True)
+                elif action == "unmute":
+                    backend.set_muted(False)
                 else:
-                    if action == "mute":
-                        mic.set_muted(True)
-                    elif action == "unmute":
-                        mic.set_muted(False)
-                    else:
-                        mic.toggle()
-                    muted_state = mic.is_muted()
-                    action_text = f"{action.upper()} -> {'MUTED' if muted_state else 'ON'}"
-                    action_at = time.monotonic()
-                    if beep:
-                        beep_async(muted_state)
+                    backend.toggle()
+                muted_state = backend.muted
+                action_text = f"{action.upper()} -> {'MUTED' if muted_state else 'ON'}"
+                action_at = time.monotonic()
+                if beep:
+                    beep_async(bool(muted_state))
 
             fps_frames += 1
             now = time.monotonic()
@@ -241,9 +240,6 @@ def run(args: argparse.Namespace) -> int:
                 fps = fps_frames / (now - fps_at)
                 fps_frames = 0
                 fps_at = now
-            if mic_available and now - state_at >= 0.5:
-                muted_state = mic.is_muted()
-                state_at = now
 
             if show_window:
                 if points is not None:
@@ -255,7 +251,7 @@ def run(args: argparse.Namespace) -> int:
                     muted=muted_state,
                     action_text=action_text if now - action_at < 1.2 else "",
                     fps=fps,
-                    mic_available=mic_available,
+                    backend=backend.name if backend else "no mute backend",
                 )
                 cv2.imshow(WINDOW, frame)
                 key = cv2.waitKey(1) & 0xFF
@@ -264,13 +260,6 @@ def run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        if mic_available and restore_mic_on_exit and initial_muted is not None:
-            try:
-                if mic.is_muted() != initial_muted:
-                    mic.set_muted(initial_muted)
-                    print(f"Микрофон возвращён в исходное состояние: {'MUTED' if initial_muted else 'ON'}")
-            except Exception as exc:
-                print(f"[warn] не удалось вернуть состояние микрофона: {exc}")
         capture.release()
         landmarker.close()
         if show_window:
@@ -280,17 +269,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    args = parse_args()
-    if args.unmute:
-        try:
-            mic = MicController()
-        except MicError as exc:
-            print(f"[error] {exc}")
-            return 1
-        mic.set_muted(False)
-        print(f"Микрофон включён: {mic.name}")
-        return 0
-    return run(args)
+    return run(parse_args())
 
 
 if __name__ == "__main__":

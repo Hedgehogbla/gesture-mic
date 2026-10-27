@@ -1,4 +1,9 @@
-"""Фильтр дребезга: жест должен удержаться hold_ms и срабатывает один раз."""
+"""Фильтр дребезга: жест должен удержаться и срабатывает один раз.
+
+Зачем это нужно: распознавание — вероятностное. В одном кадре рука
+похожа на жест, в следующем — нет. Без фильтра микрофон будет
+переключаться по десять раз в секунду.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,6 +27,7 @@ class GestureStabilizer:
         self._fired = False
 
     def update(self, gesture: Optional[str], now: float) -> Decision:
+        # Жест сменился — начинаем отсчёт заново.
         if gesture != self._candidate:
             self._candidate = gesture
             self._since = now
