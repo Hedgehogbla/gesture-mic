@@ -20,6 +20,7 @@ from typing import Optional
 import cv2
 import mediapipe as mp
 
+from actions import ActionRunner, VALID_ACTIONS
 from gestures import classify
 from mute import MuteBackend, MuteError, create_backend
 from overlay import draw_hud, draw_landmarks
@@ -31,7 +32,6 @@ MODEL_URL = (
     "hand_landmarker/float16/1/hand_landmarker.task"
 )
 WINDOW = "Gesture Mic"
-VALID_ACTIONS = ("mute", "unmute", "toggle")
 
 # Значения по умолчанию: config.json может переопределить любое из них.
 DEFAULTS = {
@@ -158,6 +158,7 @@ def run(args: argparse.Namespace) -> int:
     actions = {name: action for name, action in config["actions"].items() if action in VALID_ACTIONS}
     if not actions:
         print("[warn] в config.json не задано ни одного действия")
+    runner = ActionRunner(backend)
 
     camera = config["camera"]
     camera_index = args.camera if args.camera is not None else int(camera["index"])
@@ -225,19 +226,14 @@ def run(args: argparse.Namespace) -> int:
             tracked = gesture if gesture in actions else None
             decision = stabilizer.update(tracked, time.monotonic())
 
-            if decision.fired and backend:
-                action = actions[decision.gesture]
-                if action == "mute":
-                    backend.set_muted(True)
-                elif action == "unmute":
-                    backend.set_muted(False)
-                else:
-                    backend.toggle()
-                muted_state = backend.muted
-                action_text = f"{action.upper()} -> {'MUTED' if muted_state else 'ON'}"
+            if decision.fired:
+                text, new_state = runner.run(actions[decision.gesture])
+                action_text = text
                 action_at = time.monotonic()
-                if beep:
-                    beep_async(bool(muted_state))
+                if new_state is not None:
+                    muted_state = new_state
+                    if beep:
+                        beep_async(bool(new_state))
 
             fps_frames += 1
             now = time.monotonic()
@@ -256,7 +252,7 @@ def run(args: argparse.Namespace) -> int:
                     muted=muted_state,
                     action_text=action_text if now - action_at < 1.2 else "",
                     fps=fps,
-                    backend=backend.name if backend else "no mute backend",
+                    backend=backend.name if backend else "media keys only",
                 )
                 cv2.imshow(WINDOW, frame)
                 key = cv2.waitKey(1) & 0xFF

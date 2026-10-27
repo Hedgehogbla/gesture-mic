@@ -22,7 +22,10 @@
     "hotkey": "ctrl+shift+m"
   },
   "actions": {
-    "point": "toggle"
+    "point": "toggle",
+    "closed_fist": "play_pause",
+    "thumb_right": "next_track",
+    "thumb_left": "prev_track"
   },
   "feedback": {
     "show_preview": true,
